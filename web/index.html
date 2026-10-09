@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <title>PassPal · 个人凭据库</title>
+    <!--
+      主题初始化放在独立脚本里，而不是内联脚本：
+      这样 CSP 可以保持 script-src 'self'，不必为内联脚本开放 unsafe-inline。
+      脚本同步加载，因此不会出现首屏主题闪烁。
+    -->
+    <script src="/theme-init.js"></script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
