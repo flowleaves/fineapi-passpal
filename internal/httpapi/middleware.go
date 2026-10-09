@@ -105,7 +105,7 @@ func (s *Server) protected(next http.Handler) http.Handler {
 		token := cookieValue(r, auth.CookieSession)
 		sess, err := s.auth.Authenticate(r.Context(), token)
 		if err != nil {
-			clearSessionCookies(w, r, s.cfg.IsProduction())
+			clearSessionCookies(w, r, s.cfg.CookieSecure())
 			writeError(w, r, err)
 			return
 		}

@@ -264,25 +264,43 @@ DATA_ENCRYPTION_KEY ──AES-256-GCM──▶ 负责解密账号数据
 passpal backup
 ```
 
+每次备份产出一个**自包含归档** `backup-<时间戳>.tar.gz`，内含三项：
+
+| 条目 | 内容 |
+|---|---|
+| `database.sqlite` | `VACUUM INTO` 出的一致性快照（敏感字段仍是密文） |
+| `keys.json` | 该快照加密时用到的**数据密钥**（按版本） |
+| `manifest.json` | 格式版本、schema 版本、密钥版本、各表行数、库体积 |
+
 流程：`VACUUM INTO` 生成未发布临时快照 → 打开**备份文件**执行
-`PRAGMA integrity_check` 与 `foreign_key_check` → 通过后原子发布。
+`PRAGMA integrity_check` 与 `foreign_key_check` → 连同密钥打包 → 通过后原子发布。
 校验失败的快照不会出现在可下载清单里。
+
+**为什么要自带密钥**：只存快照的话，恢复时还必须另外找到当时的 `DATA_ENCRYPTION_KEY_*`，
+一旦密钥遗失或轮换过，备份就是一堆读不出的密文。打包进去后，**恢复只需要这一个文件**。
 
 ### 离线恢复
 
 ```bash
 # 必须先停止服务
-passpal restore --from /opt/passpal/backups/backup-20260101-120000.sqlite
+passpal restore --from /opt/passpal/backups/backup-20260101-120000.tar.gz
 ```
 
 恢复契约：
 
-1. 校验路径与格式，在 data 同一文件系统创建候选副本，不覆盖原库
-2. 只读校验候选库的 integrity、外键、表结构与迁移版本（拒绝未知触发器与更高版本）
-3. 逐字段检查密文头部密钥版本并验证 GCM tag/AAD
-4. 把当前 `database.sqlite` 及 WAL/SHM 复制到 `restore-rollback/<时间戳>/`
-5. 清除候选库中的旧会话与来源锁定，写入当前管理员指纹
-6. 关闭句柄后替换；启动后验证业务，失败可用回滚材料还原
+1. 识别输入是归档还是旧版纯快照；归档解包到 data 同一文件系统的临时目录
+2. 合并密钥：环境配置的 + 归档自带的。**同版本但内容冲突时拒绝恢复** ——
+   那意味着归档与当前环境对不上，硬恢复只会得到读不出的数据
+3. 只读校验候选库的 integrity、外键、表结构与迁移版本（拒绝未知触发器与更高版本）
+4. 逐字段检查密文头部密钥版本并验证 GCM tag/AAD（覆盖全部加密字段）
+5. 把当前 `database.sqlite` 及 WAL/SHM 复制到 `restore-rollback/<时间戳>/`
+6. 清除候选库中的旧会话与来源锁定，写入当前管理员指纹
+7. 关闭句柄后替换；启动后验证业务，失败可用回滚材料还原
+
+**归档密钥与环境不一致时**，恢复会打印需要写进 `.env` 的
+`DATA_ENCRYPTION_KEY_V<n>=...` 行 —— 照着改完重启服务即可，否则服务解密不了恢复后的数据。
+
+旧版 `backup-*.sqlite` 纯快照仍可恢复，此时需要环境里配置正确的密钥。
 
 恢复**不开放 HTTP 端点**，不做网页上传。
 

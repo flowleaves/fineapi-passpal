@@ -41,7 +41,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	maxAge := int(result.ExpiresAt - nowUnix())
-	setSessionCookies(w, result.SessionToken, result.CSRFToken, maxAge, s.cfg.IsProduction())
+	setSessionCookies(w, result.SessionToken, result.CSRFToken, maxAge, s.cfg.CookieSecure())
 	writeData(w, http.StatusOK, map[string]any{
 		"expires_at": result.ExpiresAt,
 		"csrf_token": result.CSRFToken,
@@ -63,7 +63,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		TargetType: audit.TargetSystem,
 		IP:         clientIPFrom(r.Context()),
 	})
-	clearSessionCookies(w, r, s.cfg.IsProduction())
+	clearSessionCookies(w, r, s.cfg.CookieSecure())
 	writeData(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -72,13 +72,13 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	token := cookieValue(r, auth.CookieSession)
 	sess, err := s.auth.Authenticate(r.Context(), token)
 	if err != nil || sess == nil {
-		clearSessionCookies(w, r, s.cfg.IsProduction())
+		clearSessionCookies(w, r, s.cfg.CookieSecure())
 		writeData(w, http.StatusOK, map[string]any{"authenticated": false})
 		return
 	}
 	// 有效会话时补发 CSRF cookie，覆盖浏览器清掉 cookie 的情况。
 	maxAge := int(sess.ExpiresAt - nowUnix())
-	setSessionCookies(w, token, s.auth.CSRFFor(token), maxAge, s.cfg.IsProduction())
+	setSessionCookies(w, token, s.auth.CSRFFor(token), maxAge, s.cfg.CookieSecure())
 	writeData(w, http.StatusOK, map[string]any{
 		"authenticated": true,
 		"expires_at":    sess.ExpiresAt,

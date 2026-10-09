@@ -241,7 +241,9 @@ onMounted(async () => {
           <h2 class="text-[15px] font-semibold">备份</h2>
         </div>
         <p class="mt-1.5 text-[13px] text-ink-2">
-          使用 SQLite 在线备份（VACUUM INTO）生成一致性快照，不依赖容器是否正常关闭。
+          用 SQLite 在线备份（VACUUM INTO）生成一致性快照，再连同<strong class="font-medium">数据加密密钥</strong>一起打包成
+          <span class="mono">.tar.gz</span> 归档 —— 恢复时只需要这一个文件，不必再找密钥。
+          代价是归档本身等同于明文凭据，请放在受控的地方。
         </p>
         <div class="mt-3 flex flex-wrap gap-2">
           <button
@@ -264,7 +266,18 @@ onMounted(async () => {
           <li v-for="b in backups" :key="b.name" class="flex items-center gap-2 px-3 py-2">
             <div class="min-w-0 flex-1">
               <div class="mono truncate">{{ b.name }}</div>
-              <div class="text-xs text-ink-3">{{ formatDateTime(b.created_at) }} · {{ fmtSize(b.size) }}</div>
+              <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-ink-3">
+                <span>{{ formatDateTime(b.created_at) }}</span>
+                <span>·</span>
+                <span>{{ fmtSize(b.size) }}</span>
+                <span>·</span>
+                <span v-if="b.self_contained" class="text-brand" title="内含密钥，恢复时不需要额外提供密钥">
+                  自包含可恢复
+                </span>
+                <span v-else class="text-danger" title="旧版快照，敏感字段仍是密文；恢复时必须另外提供当时的数据加密密钥">
+                  旧格式 · 恢复需外部密钥
+                </span>
+              </div>
             </div>
             <button
               class="flex h-7 items-center gap-1 rounded-sm border border-border-strong px-2 text-xs text-ink-2 hover:bg-surface-2"

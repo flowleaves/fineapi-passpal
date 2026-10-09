@@ -119,6 +119,32 @@ chown -R 10001:10001 /opt/passpal/data /opt/passpal/backups
 
 **不碰的东西**：同机上的 `momo`（5200）与 1Panel（12914）保持原样。
 
+## 部署后修复的两个缺陷
+
+### 1 · 明文 HTTP 下登录后立刻「会话无效」
+
+`pp_session` cookie 带 `Secure` 标志，而 `Secure` cookie **只在 HTTPS 下才会被浏览器回传** ——
+服务跑在明文 HTTP 上时，登录接口返回 200，但浏览器下次请求不带 cookie，页面报
+「会话无效或已过期」。
+
+根因是 `secure` 标志直接取自 `IsProduction()`。**正确做法是按 `APP_ORIGIN` 的实际
+scheme 决定**，而不是按环境名。已改为 `Config.CookieSecure()`：`https://` 开头才置 `Secure`。
+生产 + 明文 HTTP 时启动日志会打 `cookie_secure=false` 并给出告警。
+
+> 这也解释了为什么本地 `APP_ENV=dev` 测不出来 —— 只有生产模式才触发。
+
+### 2 · 备份只存快照，密钥一丢就再也恢复不了
+
+原备份是 `VACUUM INTO` 出来的纯 `.sqlite` 快照，**敏感字段仍是密文**，
+恢复时必须另外提供当时的 `DATA_ENCRYPTION_KEY_*`。密钥遗失或轮换过 = 备份作废。
+
+已改为**自包含归档** `backup-<时间戳>.tar.gz`，内含加密快照 + `keys.json` + `manifest.json`，
+**恢复只需这一个文件**。旧格式纯快照仍兼容。
+
+> 顺带修了一个静默 bug：`maxSchemaVersion` 原为手写常量 `2`，而 schema 已演进到 4，
+> 导致从迁移 0003 起恢复功能一直失效。已改为从内嵌迁移文件推导（`passpal.MaxMigrationVersion()`），
+> 并有单测锁死。
+
 ## 升级
 
 ```bash

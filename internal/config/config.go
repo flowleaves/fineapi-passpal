@@ -48,6 +48,25 @@ type Config struct {
 // IsProduction 报告是否运行在生产模式。
 func (c *Config) IsProduction() bool { return c.AppEnv == EnvProduction }
 
+// CookieSecure 报告会话 cookie 是否应带 Secure 标志。
+//
+// 依据是 APP_ORIGIN 的**实际 scheme**，而不是 APP_ENV：
+// Secure cookie 只在 HTTPS 下才会被浏览器回传，若在明文 HTTP 站点上误加该标志，
+// 浏览器会直接丢弃 cookie —— 表现为「登录返回 200，但下一个请求就报会话无效」。
+// 所以只有当访问地址确实是 https:// 时才加。
+//
+// APP_ORIGIN 是已经过校验的规范访问地址（必须与浏览器地址一致），
+// 反代终止 TLS 的场景下它同样会被配成 https://，因此这里判断是准确的。
+func (c *Config) CookieSecure() bool {
+	return strings.HasPrefix(strings.ToLower(c.AppOrigin), "https://")
+}
+
+// UsesPlainHTTP 报告规范访问地址是否为明文 HTTP。
+// 用于启动时给出安全告警（凭据会以明文经网络传输）。
+func (c *Config) UsesPlainHTTP() bool {
+	return strings.HasPrefix(strings.ToLower(c.AppOrigin), "http://")
+}
+
 // Load 从进程环境加载配置并做完整校验。
 // 生产环境缺少合法管理员 hash 或数据密钥时返回错误，调用方必须终止启动。
 func Load() (*Config, error) {

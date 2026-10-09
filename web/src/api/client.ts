@@ -228,6 +228,8 @@ export interface BackupInfo {
   name: string;
   size: number;
   created_at: number;
+  /** 是否自带密钥（归档格式）。旧版 .sqlite 快照为 false，恢复时需另外提供密钥。 */
+  self_contained: boolean;
 }
 
 export interface Stats {

@@ -1,13 +1,16 @@
 package backup
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -18,12 +21,15 @@ import (
 
 // RestoreOptions 描述一次离线恢复。
 type RestoreOptions struct {
-	// From 是备份文件的绝对路径。
+	// From 是备份文件的绝对路径（支持自包含 .tar.gz 归档与旧版 .sqlite 快照）。
 	From string
 	// DatabasePath 是本工具当前使用的数据库路径。
 	DatabasePath string
-	// Cipher 提供密钥版本与解密能力。
-	Cipher *cryptoutil.Cipher
+	// Keys 是当前环境已配置的密钥（版本 -> 32 字节）。
+	// 归档自带的密钥会与之合并；两者同版本但内容不同则拒绝恢复。
+	Keys map[int][]byte
+	// CurrentKeyVersion 是当前环境写入时使用的版本。
+	CurrentKeyVersion int
 	// AdminHash 是当前环境的管理员 hash；恢复后写入指纹，避免复活旧会话。
 	AdminHash string
 	// MaxSchemaVersion 是当前二进制支持的最高迁移版本。
@@ -47,13 +53,12 @@ var requiredTables = []string{
 //  4. 保存当前库与 WAL/SHM 到回滚目录；
 //  5. 关闭句柄后替换，保留完整回滚材料；
 //  6. 调用方启动后验证业务，失败可回滚。
+//
+// 若来源是自包含归档，会先解包并合并其中的密钥 —— 恢复因此不依赖任何外部密钥。
 func Restore(ctx context.Context, opt RestoreOptions) error {
 	logf := opt.Logf
 	if logf == nil {
 		logf = func(string, ...any) {}
-	}
-	if opt.Cipher == nil {
-		return errors.New("恢复需要数据密钥")
 	}
 	if strings.TrimSpace(opt.From) == "" {
 		return errors.New("必须指定备份文件路径")
@@ -84,10 +89,55 @@ func Restore(ctx context.Context, opt RestoreOptions) error {
 		return fmt.Errorf("创建数据目录失败：%w", err)
 	}
 
+	// 0) 归档则解包；解包目录放在 data 同盘，避免跨文件系统复制。
+	srcDB := src
+	var arcKeys map[int][]byte
+	arcCurrent := 0
+	if IsArchivePath(src) {
+		workDir, err := os.MkdirTemp(dataDir, ".restore-arc-")
+		if err != nil {
+			return fmt.Errorf("创建解包目录失败：%w", err)
+		}
+		defer func() { _ = os.RemoveAll(workDir) }()
+
+		got, err := extractArchive(src, workDir)
+		if err != nil {
+			return fmt.Errorf("解包备份归档失败：%w", err)
+		}
+		srcDB = got.DBPath
+		arcKeys = got.Keys
+		if got.Manifest != nil {
+			arcCurrent = got.Manifest.CurrentKeyVersion
+			logf("归档清单：schema=%d 密钥版本=%v 内容=%v",
+				got.Manifest.SchemaVersion, got.Manifest.KeyVersions, got.Manifest.Counts)
+		}
+		logf("归档已解包，内含 %d 个密钥版本", len(arcKeys))
+	}
+
+	merged, needUpdate := mergeKeys(opt.Keys, arcKeys)
+	if len(merged) == 0 {
+		return errors.New("没有可用密钥：当前环境未配置，归档内也没有")
+	}
+	// 恢复只做解密，「当前版本」取哪个都不影响正确性；只为构造 Cipher 选一个存在的。
+	cur := opt.CurrentKeyVersion
+	if _, ok := merged[cur]; !ok {
+		cur = arcCurrent
+	}
+	if _, ok := merged[cur]; !ok {
+		for v := range merged {
+			cur = v
+			break
+		}
+	}
+	cipher, err := cryptoutil.NewCipher(merged, cur)
+	if err != nil {
+		return err
+	}
+
 	// 1) 同文件系统候选副本
 	candidate := filepath.Join(dataDir, ".restore-candidate.sqlite")
 	_ = os.Remove(candidate)
-	if err := copyFile(src, candidate, 0o600); err != nil {
+	if err := copyFile(srcDB, candidate, 0o600); err != nil {
 		return fmt.Errorf("创建候选副本失败：%w", err)
 	}
 	committed := false
@@ -105,7 +155,7 @@ func Restore(ctx context.Context, opt RestoreOptions) error {
 	logf("候选库结构与版本校验通过")
 
 	// 3) 密钥与密文校验
-	if err := verifySecrets(ctx, candidate, opt.Cipher); err != nil {
+	if err := verifySecrets(ctx, candidate, cipher); err != nil {
 		return err
 	}
 	logf("全部密文字段校验通过")
@@ -138,7 +188,48 @@ func Restore(ctx context.Context, opt RestoreOptions) error {
 		_ = db.Close()
 	}
 	logf("恢复完成：%s -> %s", filepath.Base(src), target)
+	reportKeyRequirements(logf, merged, needUpdate, cur)
 	return nil
+}
+
+// mergeKeys 合并「环境配置的密钥」与「归档自带的密钥」。
+//
+// 语义：**归档对它自己那份数据是权威**。归档覆盖的版本一律以归档为准，
+// 并把「环境里缺失或不同」的版本回报给调用方 —— 因为恢复后的服务读的是 .env，
+// 如果两者不一致，服务就解不开恢复回来的数据。调用方必须把这个差异显式告知用户。
+func mergeKeys(configured, fromArchive map[int][]byte) (merged map[int][]byte, needUpdate []int) {
+	merged = make(map[int][]byte, len(configured)+len(fromArchive))
+	for v, k := range configured {
+		merged[v] = k
+	}
+	for v, k := range fromArchive {
+		if exist, ok := merged[v]; ok && bytes.Equal(exist, k) {
+			continue // 完全一致，无需提示
+		}
+		merged[v] = k
+		needUpdate = append(needUpdate, v)
+	}
+	sort.Ints(needUpdate)
+	return merged, needUpdate
+}
+
+// reportKeyRequirements 打印恢复后必须写进 .env 的密钥行。
+//
+// 这一步不能省：恢复出来的库是用归档里的密钥加密的，
+// 而运行中的服务只认 .env —— 不告知就等于「恢复成功但打不开」。
+func reportKeyRequirements(logf func(string, ...any), keys map[int][]byte, needUpdate []int, current int) {
+	if len(needUpdate) == 0 {
+		return
+	}
+	logf("")
+	logf("⚠️  本次恢复的数据使用归档内自带的密钥，与当前环境配置不一致。")
+	logf("    必须把下面这些行写入 .env 并重启服务，否则服务无法解密恢复后的数据：")
+	for _, v := range needUpdate {
+		logf("        DATA_ENCRYPTION_KEY_V%d=%s", v, base64.StdEncoding.EncodeToString(keys[v]))
+	}
+	logf("        DATA_ENCRYPTION_KEY_CURRENT=%d", current)
+	logf("    以上内容含密钥，请勿外发或留在终端回滚记录里。")
+	logf("")
 }
 
 // validateCandidate 检查候选库的完整性、外键、表结构与迁移版本。
@@ -201,7 +292,8 @@ func verifySecrets(ctx context.Context, path string, cipher *cryptoutil.Cipher) 
 
 	rows, err := db.QueryContext(ctx, `
         SELECT id, password_encrypted, backup_email_encrypted, f2a_encrypted,
-               credential_json_encrypted, notes_encrypted FROM accounts`)
+               credential_json_encrypted, notes_encrypted,
+               refresh_token_encrypted, sms_link_encrypted FROM accounts`)
 	if err != nil {
 		return fmt.Errorf("读取账号密文失败：%w", err)
 	}
@@ -210,13 +302,16 @@ func verifySecrets(ctx context.Context, path string, cipher *cryptoutil.Cipher) 
 	checked := 0
 	for rows.Next() {
 		var id int64
-		var blobs [5][]byte
-		if err := rows.Scan(&id, &blobs[0], &blobs[1], &blobs[2], &blobs[3], &blobs[4]); err != nil {
+		var blobs [7][]byte
+		if err := rows.Scan(&id, &blobs[0], &blobs[1], &blobs[2], &blobs[3],
+			&blobs[4], &blobs[5], &blobs[6]); err != nil {
 			return fmt.Errorf("读取账号密文失败：%w", err)
 		}
+		// 顺序必须与上面的 SELECT 一致；漏字段会让恢复后才发现数据读不出来。
 		for i, field := range []string{
 			cryptoutil.FieldPassword, cryptoutil.FieldBackupEmail, cryptoutil.FieldF2A,
 			cryptoutil.FieldCredentialJSON, cryptoutil.FieldNotes,
+			cryptoutil.FieldRefreshToken, cryptoutil.FieldSMSLink,
 		} {
 			if len(blobs[i]) == 0 {
 				continue
