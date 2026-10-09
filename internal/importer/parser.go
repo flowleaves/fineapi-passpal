@@ -120,8 +120,8 @@ func Parse(input string) (*Result, error) {
 		return finalize(parseKeyValue(body), input)
 	}
 
-	if sep, ok := detectDelimiter(body); ok {
-		return finalize(parseDelimited(body, sep), input)
+	if _, ok := looksLikeDelimited(body); ok {
+		return finalize(parseDelimited(body), input)
 	}
 
 	return finalize(parsePlainText(body), input)
@@ -229,7 +229,7 @@ func finalize(res *Result, input string) (*Result, error) {
 //	email----password----TOTP <TAB> 订阅成功 <TAB> 时间 <TAB> ... <TAB> {"client_id":...}
 //
 // 第一列才是账号主体，后面的列是状态与凭证。
-// 只有当 tab 之前已经是复合主体（含 ---- 或 |）时才裁剪；
+// 只有当 tab 之前已经是复合主体（含连字符分隔符或 |）时才裁剪；
 // 否则 tab 本身就是字段分隔符（email<TAB>password），不能裁。
 func stripMetaTail(line string) string {
 	idx := strings.IndexByte(line, '\t')
@@ -237,7 +237,7 @@ func stripMetaTail(line string) string {
 		return line
 	}
 	head := line[:idx]
-	if strings.Contains(head, "----") || strings.Contains(head, "|") {
+	if dashSplitRe.MatchString(head) || strings.Contains(head, "|") {
 		return head
 	}
 	return line
@@ -425,9 +425,15 @@ func resolveField(key string) (string, bool) {
 }
 
 // looksLikeEmail 做一次宽松的邮箱判断（不依赖正则性能）。
+//
+// 含分隔符特征的串一律不是邮箱 —— 那说明整行没被切开（分隔符没识别出来），
+// 放行会让「邮箱」字段塞进整行原文，最终报一个莫名其妙的 email_invalid。
 func looksLikeEmail(s string) bool {
 	s = strings.TrimSpace(s)
 	if s == "" || strings.ContainsAny(s, " \t") {
+		return false
+	}
+	if strings.Contains(s, "---") || strings.Contains(s, "|") {
 		return false
 	}
 	at := strings.LastIndex(s, "@")

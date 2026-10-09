@@ -134,6 +134,7 @@ passpal version
 | 形态 | 示例 |
 |---|---|
 | 四段分隔 | `email----password----backup_email----f2a` |
+| 三连字符 | `email---password---f2a---refresh_token` |
 | 竖线分隔 | `email\|password\|backup_email\|f2a` |
 | 空字段 | `email----password--------f2a----refresh_token`（连续分隔符 = 空列，会跳过） |
 | Key-Value | `email: …` / `password: …` / `rt: …` |
@@ -141,9 +142,17 @@ passpal version
 | JSON | 对象、数组，或 `{"accounts":[…]}` 包装 |
 | 一行多列 | `主体 <TAB> 状态 <TAB> 时间 <TAB> {"client_id":…}` |
 
+> **连字符个数不限**：3 个、4 个、5 个及以上都按同一规则切开（统一匹配 3 个及以上连续连字符）。
+> 不同导出工具用的个数不一样，不需要手工改。
+
 ### 字段识别与归一化
 
-- **邮箱** —— 正则匹配，取行内第一个命中；邮箱是账号主标识，缺失或非法即为无效行
+- **分隔符格式的列归位** —— 不按固定列序硬套，而是**逐列看内容**：邮箱归 `email`、
+  `1//` 开头的长串归 `refresh_token`、base32 归 `F2A`，其余依次填密码 / F2A / refresh token。
+  所以像 `email---password---f2a---refresh_token` 这种**顺序与示例不同**的导出也能正确解析，
+  第 3 段是 base32 就不会被误当成辅助邮箱
+- **邮箱** —— 正则匹配，取行内第一个命中；邮箱是账号主标识，缺失或非法即为无效行。
+  含分隔符特征的串（`---` / `|`）不算邮箱，避免整行没切开时被塞进 email 字段
 - **密码** —— 字段名优先 → 分隔符位置 → 位置推断
 - **辅助邮箱** —— 关键词（`backup` / `recovery` / `辅助邮箱`…）或第二个邮箱
 - **F2A** —— 关键词 / `otpauth://` URI / 裸 base32。
