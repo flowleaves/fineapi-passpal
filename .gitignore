@@ -18,6 +18,9 @@ passpal
 passpal.exe
 node_modules/
 
+# 部署暂存：交叉编译出来的 Linux 二进制不入库（由 deploy/README 的构建命令生成）
+deploy/dist/
+
 # 前端构建产物不入库（由 `make web` 生成）。
 # 但保留目录占位：embed.go 的 //go:embed all:web/dist 要求该目录存在，
 # 否则新克隆后 `go build` / `go vet` 会直接失败。

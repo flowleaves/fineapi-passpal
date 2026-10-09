@@ -1,0 +1,46 @@
+# 服务器部署编排（117.72.104.206）。
+#
+# 与仓库根目录的 docker-compose.yml 的区别：
+#   - build 指向 Dockerfile.runtime（用预编译二进制，不在服务器上编译）
+#   - 对外端口 3200（根目录那份是给本机/反代用的 127.0.0.1:3000）
+#
+# 部署前需要同目录存在：
+#   dist/passpal   —— 开发机交叉编译产物
+#   .env           —— 含 ADMIN_PASSWORD_HASH / DATA_ENCRYPTION_KEY_V1 / APP_ORIGIN
+
+services:
+  passpal:
+    build:
+      context: .
+      dockerfile: Dockerfile.runtime
+    image: passpal:latest
+    container_name: passpal
+    restart: unless-stopped
+
+    # 对外暴露 3200；容器内仍是 3000
+    ports:
+      - "3200:3000"
+
+    # 运行期加固
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    pids_limit: 64
+
+    volumes:
+      - ./data:/app/data
+      - ./backups:/app/backups
+
+    env_file:
+      - .env
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

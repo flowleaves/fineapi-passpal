@@ -1,0 +1,43 @@
+# 运行镜像：只打包**预编译好的 Linux 二进制**，不在服务器上编译。
+#
+# 为什么不用仓库根目录那个多阶段 Dockerfile：
+# 目标服务器是 2C2G，且到 Docker Hub / npm 的链路很慢。拉 golang + node 基础镜像
+# 再跑 `npm ci`（约 200MB 依赖）会长时间占满这台机器 —— 历史上因此拖死过一次。
+# 而 passpal 的二进制已经把前端产物（web/dist）和迁移 SQL 全部 go:embed 进去了，
+# 所以运行镜像只需要 alpine + 一个文件。
+#
+# 构建前先在开发机交叉编译（CGO_ENABLED=0 是因为 modernc.org/sqlite 是纯 Go）：
+#   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+#     go build -trimpath -ldflags="-s -w" -o deploy/dist/passpal ./cmd/passpal
+#
+# 然后在服务器上：
+#   cd /opt/passpal && docker compose build && docker compose up -d
+
+FROM alpine:3.22
+
+RUN apk add --no-cache ca-certificates tzdata wget \
+ && addgroup -S -g 10001 passpal \
+ && adduser -S -D -H -u 10001 -G passpal passpal
+
+WORKDIR /app
+
+# 预编译产物；只读挂载 + 非 root 运行
+COPY dist/passpal /app/passpal
+RUN chmod 0755 /app/passpal
+
+USER 10001:10001
+
+ENV APP_ENV=production \
+    BIND_ADDR=0.0.0.0 \
+    PORT=3000 \
+    DATABASE_PATH=/app/data/database.sqlite \
+    BACKUP_DIR=/app/backups \
+    TZ=Asia/Shanghai
+
+VOLUME ["/app/data", "/app/backups"]
+EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
+  CMD wget -qO- http://127.0.0.1:3000/api/health || exit 1
+
+ENTRYPOINT ["/app/passpal", "serve"]
